@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- ▼ GitHub에 올릴 때: content="" 따옴표 안에 Apps Script 웹 앱 주소(끝이 /exec)를 붙여 넣으세요 ▼ -->
-<meta name="app-api" content="https://script.google.com/macros/s/AKfycbxf7g1qF-OzyC5EBt_WPkrm34pMupOPnv3TB4Nhw1fqpiQ1kKin9iE1TvKjc0gCUYc_/exec">
+<meta name="app-api" content="">
 <title>중국어 단어·문장 교실</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -348,6 +348,7 @@ input{font:inherit}
 .evc.good{border-color:var(--ok);background:var(--ok-bg)} .evc.good .n{color:var(--ok)}
 .evc.mid{border-color:var(--yellow);background:#FFF6DA} .evc.mid .n{color:#8A6200}
 .evc.bad{border-color:var(--bad);background:var(--bad-bg)} .evc.bad .n{color:var(--bad)}
+.evc.er{border-color:transparent;background:none;min-width:30px;margin-left:-8px;color:var(--ink-2)}
 .evtips{margin:0;padding-left:20px;line-height:1.7;font-size:15px}
 .evtips b{font-family:inherit}
 /* 카드 뒤집기: 자리 바꾼 카드 */
@@ -508,8 +509,47 @@ const MARK = {};
 const INITIALS = ['zh','ch','sh','b','p','m','f','d','t','n','l','g','k','h','j','q','x','r','z','c','s','y','w',''];
 const FINALS = new Set('a o e ai ei ao ou an en ang eng ong er i ia ie iao iu ian in iang ing iong u ua uo uai ui uan un uang ueng v ve van vn ue'.split(' '));
 function validSyl(b){
-  for (const ini of INITIALS){ if (!b.startsWith(ini)) continue; const f = b.slice(ini.length); if (f && FINALS.has(f)) return true; }
+  for (const ini of INITIALS){
+    if (!b.startsWith(ini)) continue;
+    const f = b.slice(ini.length);
+    /* 성모 없는 음절은 a·o·e 로 시작할 때만 (i·u·ü 로 시작하면 yi·wu·yu 처럼 써야 하므로 따로 서지 못함) */
+    if (!ini && (!/^[aoe]/.test(f) || f === 'ong')) continue;
+    if (f && FINALS.has(f)) return true;
+  }
   return b.length > 2 && b.endsWith('r') && b !== 'er' && validSyl(b.slice(0, -1));
+}
+/* 문장 병음 → 한자마다 병음 (儿化 처리)
+   - 这儿 zhèr 처럼 儿 이 앞 음절에 붙어 소리가 하나 줄어들면, 앞 글자에 zhèr, 儿 에는 '' 를 줌
+   - zhè r 처럼 r 을 띄어 써도 zhèr 로 읽음 */
+function hanSyls(py, hans){
+  const V = 'a-zāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜü';
+  py = String(py || '').replace(new RegExp('([' + V + '])[\\s\'’-]+r(?![' + V + '])', 'gi'), '$1r');
+  const H = hans.length;
+  const full = splitPinyin(py, H);
+  const er = hans.map((c, i) => c === '儿' && i > 0 ? i : -1).filter(i => i >= 0);
+  if (!er.length) return full;
+  /* 儿 이 있으면 '儿 을 따로 읽는 경우'와 '앞 음절에 붙는 경우'를 모두 해 보고 더 자연스러운 쪽 (같으면 붙는 쪽) */
+  let best = full;
+  /* 儿 몇 개가 앞 음절에 붙었는지 모를 때: 많이 붙은 경우부터 차례로 시도 */
+  const subsets = [];
+  for (let mask = (1 << er.length) - 1; mask > 0; mask--){
+    const sub = er.filter((_, j) => mask & (1 << j));
+    subsets.push(sub);
+  }
+  subsets.sort((a, b) => b.length - a.length);
+  for (const sub of subsets){
+    const syl = splitPinyin(py, H - sub.length);
+    if (!syl) continue;
+    const out = []; let j = 0, ok = true;
+    for (let i = 0; i < H; i++){
+      if (sub.indexOf(i) >= 0){
+        if (!/r$/.test(out[out.length - 1] || '')){ ok = false; break; }
+        out.push('');
+      } else out.push(syl[j++]);
+    }
+    if (ok && j === syl.length && (!best || syl.pen <= best.pen)){ out.pen = syl.pen; best = out; break; }
+  }
+  return best;
 }
 /* 병음을 n개 음절로 나눔 (실패하면 null) */
 function splitPinyin(py, n){
@@ -538,6 +578,7 @@ function splitPinyin(py, n){
   if (best[N][n] >= INF) return null;
   const out = []; let i = N, k = n;
   while (k > 0){ const j = from[i][k]; out.unshift(L.slice(j, i).map(x => x.d).join('').toLowerCase()); i = j; k--; }
+  out.pen = best[N][n];   /* 어색한 나눔(모음으로 시작하는 음절이 붙어 있음)일수록 큼 */
   return out;
 }
 /* 단원 데이터 준비: 조각마다 병음, 한자→병음 사전 */
@@ -547,13 +588,13 @@ function prepUnit(d){
   d.words.forEach(w => put(w.h, w.p));
   d.sentences.forEach(s => {
     const hans = Array.from(s.zh).filter(isHan), n = hans.length;
-    const syl = n ? splitPinyin(s.py, n) : null;
+    const syl = n ? hanSyls(s.py, hans) : null;
     const counts = s.pieces.map(p => Array.from(p).filter(isHan).length);
     if (syl && counts.reduce((a, b) => a + b, 0) === n){
       let k = 0;
       s.ppy = s.pieces.map((p, i) => { const x = syl.slice(k, k + counts[i]); k += counts[i]; return x.join(''); });
       s.pieces.forEach((p, i) => put(p, s.ppy[i]));
-      hans.forEach((ch, c) => put(ch, syl[c]));
+      hans.forEach((ch, c) => { if (syl[c + 1] !== '') put(ch, syl[c]); });   /* 儿化된 글자(这 → zhèr)는 한 글자 사전에 넣지 않음 */
     }
   });
   d.pymap = map;
@@ -1451,8 +1492,9 @@ const pyArr = text => { try { return window.pinyinPro ? pinyinPro.pinyin(text, {
 /* 문장의 글자마다 기대하는 병음 (선생님이 적은 병음 → 없으면 사전) */
 function targetChars(s){
   const hans = Array.from(s.zh).filter(isHan);
-  const syl = splitPinyin(s.py, hans.length) || pyArr(hans.join(''));
-  const T = hans.map((ch, i) => Object.assign({ ch }, syl && syl[i] ? sylParts(syl[i]) : { syl:'', base:'', ini:'', fin:'', tone:0 }));
+  const syl = hanSyls(s.py, hans) || pyArr(hans.join(''));
+  const T = hans.map((ch, i) => Object.assign({ ch }, syl && syl[i] ? sylParts(syl[i]) : { syl:'', base:'', ini:'', fin:'', tone:0 },
+    { erhua: !!(syl && syl[i] === '' && ch === '儿') }));   /* 앞 음절에 붙은 儿: 따로 채점하지 않음 */
   /* 성조 변화 (음높이 비교용): 3성+3성 → 2성, 不+4성 → 2성, 一+4성 → 2성, 一+1·2·3성 → 4성 */
   T.forEach((t, i) => {
     const nx = T[i + 1]; t.t2 = t.tone;
@@ -1533,8 +1575,11 @@ function scoreOne(T, text, pitch){
     else if (i > 0 && Math.abs(D[i][j] - (D[i - 1][j] + DEL)) < 1e-9) i--;
     else { ins++; j--; }
   }
+  /* 음높이는 소리 나는 음절(儿化된 儿 제외) 순서대로 */
+  const pIdx = []; let pc = 0; T.forEach(t => pIdx.push(t.erhua ? -1 : pc++));
   const chars = T.map((t, k) => {
     const r = match[k];
+    if (t.erhua) return { t, r, score:100, erhua:true };
     if (!r) return { t, r:null, score:0, missing:true };
     const exact = t.ch === r.ch;
     const I = exact ? 100 : partScore(SIM_INI, t.ini, r.ini);
@@ -1543,7 +1588,7 @@ function scoreOne(T, text, pitch){
     let T1 = null, P = null, guess = null;
     if (!neutral){
       T1 = exact || r.tone === t.tone ? 100 : 0;
-      const seq = pitch && pitch[k];
+      const seq = pitch && pitch[pIdx[k]];
       if (seq){
         P = toneFit(seq, t.t2);
         const fits = [1, 2, 3, 4].map(x => toneFit(seq, x));
@@ -1559,12 +1604,12 @@ function scoreOne(T, text, pitch){
     const score = neutral ? Math.round(base) : Math.round(base * (0.35 + 0.65 * tone / 100));
     return { t, r, I, F, tone, guess, score };
   });
-  const total = Math.max(0, Math.round(avg(chars.map(c => c.score)) - Math.min(20, ins * 5)));
+  const total = Math.max(0, Math.round(avg(chars.filter(c => !c.erhua).map(c => c.score)) - Math.min(20, ins * 5)));
   return { total, chars, heard: R.join(''), ins };
 }
 function scoreSentence(s, texts, frames){
   const T = targetChars(s);
-  const pitch = pitchPerChar(frames, T.length);
+  const pitch = pitchPerChar(frames, T.filter(t => !t.erhua).length);
   let best = null;
   texts.forEach(tx => { const r = scoreOne(T, tx, pitch); if (!best || r.total > best.total) best = r; });
   return best || { total:0, chars:T.map(t => ({ t, r:null, score:0, missing:true })), heard:'', ins:0 };
@@ -1690,7 +1735,7 @@ function sentLearn(){
       <div class="row" style="justify-content:space-between;align-items:flex-end">
         <div><div class="evscore ${cls}">${sc}<span>점</span></div><div class="muted">${msg}</div></div>
         <div class="muted" style="text-align:right;font-size:14px">이 문장 최고 <b>${best}점</b>${e && e.evals ? ` · 평가 ${e.evals}번` : ''}</div></div>
-      <div class="evchars">${ev.chars.map(c => `<span class="evc ${c.score >= 80 ? 'good' : c.score >= 50 ? 'mid' : 'bad'}"><span class="p">${esc(c.t.syl || '')}</span><span class="h">${esc(c.t.ch)}</span><span class="n">${c.score}</span></span>`).join('')}</div>
+      <div class="evchars">${ev.chars.map(c => c.erhua ? `<span class="evc er" title="앞 글자에 붙어 소리 나는 儿"><span class="p">&nbsp;</span><span class="h">${esc(c.t.ch)}</span><span class="n">&nbsp;</span></span>` : `<span class="evc ${c.score >= 80 ? 'good' : c.score >= 50 ? 'mid' : 'bad'}"><span class="p">${esc(c.t.syl || '')}</span><span class="h">${esc(c.t.ch)}</span><span class="n">${c.score}</span></span>`).join('')}</div>
       <div class="muted" style="font-size:14px">들린 문장: <span class="zh" lang="zh-CN">${esc(ev.heard || '(알아듣지 못했어요)')}</span></div>
       ${tips.length ? `<ul class="evtips">${tips.map(t => `<li>${t}</li>`).join('')}</ul>` : '<p class="muted" style="margin:0">모든 글자를 정확하게 읽었어요 👏</p>'}
       ${ev.saving ? '<div class="fb" style="background:#EFE7CF;color:var(--ink-2)">점수를 저장하는 중…</div>' : ''}
